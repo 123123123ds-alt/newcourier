@@ -1,0 +1,14 @@
+{
+  "name": "newcourier",
+  "private": true,
+  "packageManager": "pnpm@8.15.6",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "prettier": "^3.2.5"
+  }
+}
