@@ -14,9 +14,9 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { SafeUser } from '../common/types/user.types';
 import { CancelShipmentDto } from './dto/cancel-shipment.dto';
 import { CreateShipmentDto } from './dto/create-shipment.dto';
-import { LabelShipmentQueryDto } from './dto/label-shipment.dto';
+import { LabelShipmentDto, LabelShipmentQueryDto } from './dto/label-shipment.dto';
 import { ListShipmentsDto } from './dto/list-shipments.dto';
-import { TrackShipmentQueryDto } from './dto/track-shipment.dto';
+import { TrackShipmentDto, TrackShipmentQueryDto } from './dto/track-shipment.dto';
 import { ShipmentWithEvents, ShipmentsService } from './shipments.service';
 
 @Controller('shipments')
@@ -74,6 +74,24 @@ export class ShipmentsController {
     @Query() trackShipmentDto: TrackShipmentQueryDto
   ): Promise<ShipmentWithEvents> {
     return this.shipmentsService.track(user, id, trackShipmentDto);
+  }
+
+  @Post(':id/label')
+  requestLabelViaBody(
+    @CurrentUser() user: SafeUser,
+    @Param('id') id: string,
+    @Body() labelShipmentDto: LabelShipmentDto
+  ): Promise<Shipment> {
+    return this.shipmentsService.requestLabel(user, id, labelShipmentDto);
+  }
+
+  @Post(':id/track')
+  trackViaBody(
+    @CurrentUser() user: SafeUser,
+    @Param('id') id: string,
+    @Body() trackShipmentDto: TrackShipmentDto
+  ): Promise<ShipmentWithEvents> {
+    return this.shipmentsService.trackViaBody(user, id, trackShipmentDto);
   }
 
   @Post(':id/cancel')

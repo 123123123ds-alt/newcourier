@@ -13,15 +13,16 @@ enum Role {
 }
 
 model User {
-  id           String     @id @default(cuid())
-  email        String     @unique
-  name         String?
-  role         Role       @default(USER)
-  passwordHash String
-  isActive     Boolean    @default(true)
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
-  shipments    Shipment[]
+  id            String          @id @default(cuid())
+  email         String          @unique
+  name          String?
+  role          Role            @default(USER)
+  passwordHash  String
+  isActive      Boolean         @default(true)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  shipments     Shipment[]
+  refreshTokens RefreshToken[]
 }
 
 model Shipment {
@@ -39,6 +40,8 @@ model Shipment {
   labelType      String?
   labelUrl       String?
   invoiceUrl     String?
+  fee            Decimal?        @db.Decimal(10, 2)
+  metadata       Json?
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
   rawRequest     Json?
@@ -47,12 +50,21 @@ model Shipment {
 }
 
 model TrackingEvent {
-  id         String    @id @default(cuid())
+  id         String   @id @default(cuid())
   shipmentId String
-  shipment   Shipment  @relation(fields: [shipmentId], references: [id])
+  shipment   Shipment @relation(fields: [shipmentId], references: [id])
   occurredAt DateTime
   statusCode String?
   comment    String?
   area       String?
-  createdAt  DateTime  @default(now())
+  createdAt  DateTime @default(now())
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
 }

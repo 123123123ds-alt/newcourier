@@ -35,15 +35,17 @@ Each application also contains its own README with additional details.
 
 ### Helpful commands
 
-| Command       | Description                                          |
-| ------------- | ---------------------------------------------------- |
-| `pnpm dev`    | Run all workspace apps in dev mode                    |
-| `pnpm build`  | Build all workspace apps                              |
-| `pnpm lint`   | Run linters across the workspace                      |
-| `pnpm format` | Format files with Prettier                            |
-| `make dev`    | Provision Docker services, run migrations and seed DB |
-| `make down`   | Stop the Docker Compose stack                         |
-| `make logs`   | Tail logs from the running Docker containers          |
+| Command            | Description                                           |
+| ------------------ | ----------------------------------------------------- |
+| `pnpm dev`         | Run all workspace apps in dev mode                    |
+| `pnpm build`       | Build all workspace apps                              |
+| `pnpm lint`        | Run linters across the workspace                      |
+| `pnpm format`      | Format files with Prettier                            |
+| `make install`     | Install dependencies via pnpm                        |
+| `make dev`         | Provision Docker services, run migrations and seed DB |
+| `make docker-up`   | Build and start the Docker Compose stack              |
+| `make docker-down` | Stop the Docker Compose stack                         |
+| `make docker-logs` | Tail logs from the running Docker containers          |
 
 ## Docker development environment
 

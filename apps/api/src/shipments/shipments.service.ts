@@ -19,9 +19,9 @@ import {
   ShipmentItemDto,
   ShipmentPartyDto
 } from './dto/create-shipment.dto';
-import { LabelShipmentQueryDto } from './dto/label-shipment.dto';
+import { LabelShipmentDto, LabelShipmentQueryDto } from './dto/label-shipment.dto';
 import { ListShipmentsDto } from './dto/list-shipments.dto';
-import { TrackShipmentQueryDto } from './dto/track-shipment.dto';
+import { TrackShipmentDto, TrackShipmentQueryDto } from './dto/track-shipment.dto';
 
 export type ShipmentWithEvents = Shipment & { events: TrackingEvent[] };
 
@@ -289,6 +289,14 @@ export class ShipmentsService implements OnModuleDestroy {
     });
   }
 
+  async requestLabel(
+    user: SafeUser,
+    id: string,
+    dto: LabelShipmentDto
+  ): Promise<Shipment> {
+    return this.getLabel(user, id, dto);
+  }
+
   async cancel(
     user: SafeUser,
     id: string,
@@ -433,6 +441,14 @@ export class ShipmentsService implements OnModuleDestroy {
     await this.prisma.$transaction(operations);
 
     return this.findOne(user, shipment.id);
+  }
+
+  async trackViaBody(
+    user: SafeUser,
+    id: string,
+    dto: TrackShipmentDto
+  ): Promise<ShipmentWithEvents> {
+    return this.track(user, id, dto);
   }
 
   async trackAnonymous(
