@@ -27,4 +27,9 @@ export class UsersController {
   disable(@Param('id') id: string): Promise<SafeUser> {
     return this.usersService.disable(id);
   }
+
+  @Patch(':id/enable')
+  enable(@Param('id') id: string): Promise<SafeUser> {
+    return this.usersService.enable(id);
+  }
 }

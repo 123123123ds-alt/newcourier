@@ -3,7 +3,6 @@ import {
   Controller,
   Get,
   Param,
-  Patch,
   Post,
   Query,
   UseGuards
@@ -15,10 +14,9 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { SafeUser } from '../common/types/user.types';
 import { CancelShipmentDto } from './dto/cancel-shipment.dto';
 import { CreateShipmentDto } from './dto/create-shipment.dto';
-import { LabelShipmentDto } from './dto/label-shipment.dto';
-import { ShipmentReportQueryDto } from './dto/shipment-report-query.dto';
-import { TrackShipmentDto } from './dto/track-shipment.dto';
-import { UpdateShipmentDto } from './dto/update-shipment.dto';
+import { LabelShipmentDto, LabelShipmentQueryDto } from './dto/label-shipment.dto';
+import { ListShipmentsDto } from './dto/list-shipments.dto';
+import { TrackShipmentDto, TrackShipmentQueryDto } from './dto/track-shipment.dto';
 import { ShipmentWithEvents, ShipmentsService } from './shipments.service';
 
 @Controller('shipments')
@@ -37,24 +35,19 @@ export class ShipmentsController {
   @Get()
   list(
     @CurrentUser() user: SafeUser,
-    @Query('status') status?: string,
-    @Query('ownerId') ownerId?: string
+    @Query() query: ListShipmentsDto
   ): Promise<Shipment[]> {
-    return this.shipmentsService.findAll(user, status, ownerId);
+    return this.shipmentsService.list(user, query);
   }
 
-  @Get('report')
-  report(
-    @CurrentUser() user: SafeUser,
-    @Query() query: ShipmentReportQueryDto
-  ): Promise<{
-    totalShipments: number;
-    totalWeightKg: number;
-    totalPieces: number;
-    byStatus: Record<string, number>;
-    totalFees: number;
-  }> {
-    return this.shipmentsService.report(user, query);
+  @Get('meta/shipping-methods')
+  shippingMethods(): Promise<unknown[]> {
+    return this.shipmentsService.getShippingMethods();
+  }
+
+  @Get('meta/extra-services')
+  extraServices(): Promise<unknown[]> {
+    return this.shipmentsService.getExtraServices();
   }
 
   @Get(':id')
@@ -65,17 +58,26 @@ export class ShipmentsController {
     return this.shipmentsService.findOne(user, id);
   }
 
-  @Patch(':id')
-  update(
+  @Get(':id/label')
+  requestLabel(
     @CurrentUser() user: SafeUser,
     @Param('id') id: string,
-    @Body() updateShipmentDto: UpdateShipmentDto
+    @Query() labelShipmentDto: LabelShipmentQueryDto
   ): Promise<Shipment> {
-    return this.shipmentsService.update(user, id, updateShipmentDto);
+    return this.shipmentsService.getLabel(user, id, labelShipmentDto);
+  }
+
+  @Get(':id/track')
+  track(
+    @CurrentUser() user: SafeUser,
+    @Param('id') id: string,
+    @Query() trackShipmentDto: TrackShipmentQueryDto
+  ): Promise<ShipmentWithEvents> {
+    return this.shipmentsService.track(user, id, trackShipmentDto);
   }
 
   @Post(':id/label')
-  requestLabel(
+  requestLabelViaBody(
     @CurrentUser() user: SafeUser,
     @Param('id') id: string,
     @Body() labelShipmentDto: LabelShipmentDto
@@ -84,12 +86,12 @@ export class ShipmentsController {
   }
 
   @Post(':id/track')
-  track(
+  trackViaBody(
     @CurrentUser() user: SafeUser,
     @Param('id') id: string,
     @Body() trackShipmentDto: TrackShipmentDto
   ): Promise<ShipmentWithEvents> {
-    return this.shipmentsService.track(user, id, trackShipmentDto);
+    return this.shipmentsService.trackViaBody(user, id, trackShipmentDto);
   }
 
   @Post(':id/cancel')
@@ -99,5 +101,13 @@ export class ShipmentsController {
     @Body() cancelShipmentDto: CancelShipmentDto
   ): Promise<Shipment> {
     return this.shipmentsService.cancel(user, id, cancelShipmentDto);
+  }
+
+  @Post('preview-fee')
+  previewFee(
+    @CurrentUser() user: SafeUser,
+    @Body() dto: CreateShipmentDto
+  ): Promise<unknown> {
+    return this.shipmentsService.previewFees(user, dto);
   }
 }

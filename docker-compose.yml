@@ -2,7 +2,7 @@ version: "3.9"
 
 services:
   db:
-    image: postgres:15-alpine
+    image: postgres:16
     container_name: newcourier-db
     restart: unless-stopped
     environment:
@@ -31,16 +31,20 @@ services:
     env_file:
       - .env
     environment:
-      PORT: 3001
+      PORT: 4000
       DATABASE_URL: postgresql://postgres:postgres@db:5432/newcourier?schema=public
+      ECCANG_SERVICE_URL: ${ECCANG_SERVICE_URL}
+      ECCANG_APP_TOKEN: ${ECCANG_APP_TOKEN}
+      ECCANG_APP_KEY: ${ECCANG_APP_KEY}
+      JWT_SECRET_DEV: ${JWT_SECRET_DEV}
     ports:
-      - "3001:3001"
+      - "4000:4000"
     working_dir: /usr/src/app
     volumes:
       - .:/usr/src/app
       - api-node-modules:/usr/src/app/node_modules
     command: >-
-      sh -c "corepack enable pnpm && pnpm install && pnpm --filter @newcourier/api dev"
+      sh -c "corepack enable pnpm && pnpm install && pnpm --filter @newcourier/api start:dev"
 
   web:
     build:
@@ -54,7 +58,7 @@ services:
       - .env
     environment:
       PORT: 3000
-      NEXTAUTH_URL: http://localhost:3000
+      NEXT_PUBLIC_API_URL: http://localhost:4000/api
     ports:
       - "3000:3000"
     working_dir: /usr/src/app

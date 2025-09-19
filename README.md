@@ -35,15 +35,17 @@ Each application also contains its own README with additional details.
 
 ### Helpful commands
 
-| Command            | Description                                  |
-| ------------------ | -------------------------------------------- |
-| `pnpm dev`         | Run all workspace apps in dev mode            |
-| `pnpm build`       | Build all workspace apps                      |
-| `pnpm lint`        | Run linters across the workspace              |
-| `pnpm format`      | Format files with Prettier                    |
-| `make install`     | Install dependencies via pnpm                 |
-| `make dev`         | Start the entire stack via Docker Compose     |
-| `make docker-logs` | Tail logs from the running Docker containers |
+| Command            | Description                                           |
+| ------------------ | ----------------------------------------------------- |
+| `pnpm dev`         | Run all workspace apps in dev mode                    |
+| `pnpm build`       | Build all workspace apps                              |
+| `pnpm lint`        | Run linters across the workspace                      |
+| `pnpm format`      | Format files with Prettier                            |
+| `make install`     | Install dependencies via pnpm                        |
+| `make dev`         | Provision Docker services, run migrations and seed DB |
+| `make docker-up`   | Build and start the Docker Compose stack              |
+| `make docker-down` | Stop the Docker Compose stack                         |
+| `make docker-logs` | Tail logs from the running Docker containers          |
 
 ## Docker development environment
 
@@ -55,12 +57,15 @@ single command:
 make dev
 ```
 
-The API is exposed on port `3001`, the frontend on `3000`, and PostgreSQL on
+The API is exposed on port `4000`, the frontend on `3000`, and PostgreSQL on
 `5432`. The compose configuration mounts the source code so that local changes
-are reflected immediately.
+are reflected immediately. Running `make dev` will also copy `.env.example` to
+`.env` (if missing), install dependencies, wait for PostgreSQL to be healthy,
+apply migrations and seed the default administrator account.
 
 ## Environment variables
 
 An `.env.example` file is provided with all environment variables required by the
-stack, including ECCANG SOAP credentials, JWT settings and database connection
-information. Duplicate the file as `.env` before running the applications.
+stack, including ECCANG SOAP credentials, JWT settings, database connection
+information and the frontend API base URL. Duplicate the file as `.env` before
+running the applications.

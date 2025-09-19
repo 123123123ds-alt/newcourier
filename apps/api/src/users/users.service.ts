@@ -71,4 +71,24 @@ export class UsersService {
       throw error;
     }
   }
+
+  async enable(userId: string): Promise<SafeUser> {
+    try {
+      const user = await this.prisma.user.update({
+        where: { id: userId },
+        data: { isActive: true }
+      });
+
+      return this.toSafeUser(user);
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2025'
+      ) {
+        throw new NotFoundException('User not found');
+      }
+
+      throw error;
+    }
+  }
 }

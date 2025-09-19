@@ -4,53 +4,71 @@ import {
   ForbiddenException,
   Injectable,
   Logger,
-  NotFoundException
+  NotFoundException,
+  OnModuleDestroy
 } from '@nestjs/common';
 import { Prisma, Role, Shipment, TrackingEvent } from '@prisma/client';
 import { SafeUser } from '../common/types/user.types';
 import { EccangService } from '../eccang/eccang.service';
-import { EccangResponse } from '../eccang/eccang.types';
+import { EccangResponse, NormalizedTrackingEvent } from '../eccang/eccang.types';
 import { PrismaService } from '../prisma/prisma.service';
 import { CancelShipmentDto } from './dto/cancel-shipment.dto';
-import { CreateShipmentDto } from './dto/create-shipment.dto';
-import { LabelShipmentDto } from './dto/label-shipment.dto';
-import { ShipmentReportQueryDto } from './dto/shipment-report-query.dto';
-import { TrackShipmentDto } from './dto/track-shipment.dto';
-import { UpdateShipmentDto } from './dto/update-shipment.dto';
+import {
+  CreateShipmentDto,
+  ShipmentExtraServiceDto,
+  ShipmentItemDto,
+  ShipmentPartyDto
+} from './dto/create-shipment.dto';
+import { LabelShipmentDto, LabelShipmentQueryDto } from './dto/label-shipment.dto';
+import { ListShipmentsDto } from './dto/list-shipments.dto';
+import { TrackShipmentDto, TrackShipmentQueryDto } from './dto/track-shipment.dto';
 
 export type ShipmentWithEvents = Shipment & { events: TrackingEvent[] };
 
+const TRACK_NUMBER_POLL_INTERVAL = 10_000; // 10 seconds
+const TRACK_NUMBER_POLL_ATTEMPTS = 12; // 2 minutes
+
 @Injectable()
-export class ShipmentsService {
+export class ShipmentsService implements OnModuleDestroy {
   private readonly logger = new Logger(ShipmentsService.name);
+  private readonly pollers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly eccangService: EccangService
   ) {}
 
+  onModuleDestroy(): void {
+    this.clearPollers();
+  }
+
   async create(owner: SafeUser, dto: CreateShipmentDto): Promise<Shipment> {
-    const payload = {
-      ...(dto.orderPayload ?? {}),
-      reference_no: dto.referenceNo
-    };
+    const payload = this.buildCreateOrderPayload(dto);
 
     let response: EccangResponse<Record<string, unknown>>;
 
     try {
       response = await this.eccangService.createOrder(payload);
     } catch (error) {
-      this.logger.error('Failed to create order with ECCANG', error instanceof Error ? error.message : '');
+      this.logger.error(
+        'Failed to create order with ECCANG',
+        error instanceof Error ? error.message : ''
+      );
       throw new BadGatewayException('Failed to create order with ECCANG');
+    }
+
+    if (!this.eccangService.isAskSuccess(response)) {
+      throw new BadGatewayException(
+        this.extractMessage(response) ?? 'ECCANG rejected createOrder request'
+      );
     }
 
     const status = this.resolveStatus(response);
     const orderCode = this.findStringValue(response, [
       'orderCode',
       'order_code',
-      'ordercode',
-      'ordercode2',
-      'order_code2',
+      'orderNo',
+      'order_no',
       'code'
     ]);
     const trackingNumber = this.findStringValue(response, [
@@ -58,22 +76,28 @@ export class ShipmentsService {
       'tracking_number',
       'trackingNo',
       'tracking_no',
-      'track_no',
-      'mailNo'
+      'mailNo',
+      'logisticsNo'
     ]);
     const labelUrl = this.findStringValue(response, ['labelUrl', 'label_url']);
     const invoiceUrl = this.findStringValue(response, ['invoiceUrl', 'invoice_url']);
+    const trackStatus = this.findStringValue(response, [
+      'track_status',
+      'trackStatus',
+      'status'
+    ]);
+    const labelType = dto.labelType ?? 'PDF';
 
     try {
-      return await this.prisma.shipment.create({
+      const shipment = await this.prisma.shipment.create({
         data: {
           ownerId: owner.id,
           referenceNo: dto.referenceNo,
-          shippingMethod: dto.shippingMethod ?? null,
-          countryCode: dto.countryCode ?? null,
-          weightKg: dto.weightKg ?? null,
-          pieces: dto.pieces ?? null,
-          labelType: dto.labelType ?? null,
+          shippingMethod: dto.shippingMethod,
+          countryCode: dto.countryCode,
+          weightKg: dto.weightKg,
+          pieces: dto.pieces,
+          labelType,
           status,
           orderCode: orderCode ?? null,
           trackingNumber: trackingNumber ?? null,
@@ -83,6 +107,12 @@ export class ShipmentsService {
           rawResponse: this.mergeJsonField(null, 'createOrder', response)
         }
       });
+
+      if (!trackingNumber && this.shouldPollForTrackNumber(trackStatus)) {
+        this.enqueueTrackNumberPoll(shipment.id, shipment.referenceNo);
+      }
+
+      return shipment;
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -95,23 +125,29 @@ export class ShipmentsService {
     }
   }
 
-  async findAll(
-    requester: SafeUser,
-    status?: string,
-    ownerId?: string
-  ): Promise<Shipment[]> {
+  async list(user: SafeUser, query: ListShipmentsDto): Promise<Shipment[]> {
     const where: Prisma.ShipmentWhereInput = {};
 
-    if (status) {
-      where.status = status;
+    if (query.status) {
+      where.status = query.status;
     }
 
-    if (requester.role === Role.ADMIN) {
-      if (ownerId) {
-        where.ownerId = ownerId;
+    if (query.startDate || query.endDate) {
+      where.createdAt = {};
+      if (query.startDate) {
+        where.createdAt.gte = new Date(query.startDate);
+      }
+      if (query.endDate) {
+        where.createdAt.lte = new Date(query.endDate);
+      }
+    }
+
+    if (user.role === Role.ADMIN) {
+      if (query.mine) {
+        where.ownerId = user.id;
       }
     } else {
-      where.ownerId = requester.id;
+      where.ownerId = user.id;
     }
 
     return this.prisma.shipment.findMany({
@@ -120,68 +156,119 @@ export class ShipmentsService {
     });
   }
 
-  async findOne(requester: SafeUser, id: string): Promise<ShipmentWithEvents> {
-    const shipment = await this.prisma.shipment.findUnique({
-      where: { id },
-      include: {
-        events: {
-          orderBy: { occurredAt: 'desc' }
-        }
-      }
-    });
-
-    if (!shipment) {
-      throw new NotFoundException('Shipment not found');
-    }
-
-    this.ensureCanAccess(requester, shipment);
+  async findOne(user: SafeUser, id: string): Promise<ShipmentWithEvents> {
+    const shipment = await this.getShipmentOrThrow(id, true);
+    this.ensureCanAccess(user, shipment);
 
     return shipment;
   }
 
-  async update(
-    requester: SafeUser,
-    id: string,
-    dto: UpdateShipmentDto
-  ): Promise<Shipment> {
-    const shipment = await this.getShipmentOrThrow(id);
-    this.ensureCanAccess(requester, shipment);
+  async getShippingMethods(): Promise<unknown[]> {
+    try {
+      const response = await this.eccangService.getShippingMethod({});
 
-    return this.prisma.shipment.update({
-      where: { id },
-      data: {
-        shippingMethod: dto.shippingMethod ?? shipment.shippingMethod ?? null,
-        countryCode: dto.countryCode ?? shipment.countryCode ?? null,
-        weightKg: dto.weightKg ?? shipment.weightKg ?? null,
-        pieces: dto.pieces ?? shipment.pieces ?? null,
-        labelType: dto.labelType ?? shipment.labelType ?? null,
-        status: dto.status ?? shipment.status,
-        orderCode: dto.orderCode ?? shipment.orderCode ?? null,
-        trackingNumber: dto.trackingNumber ?? shipment.trackingNumber ?? null
+      if (!this.eccangService.isAskSuccess(response)) {
+        throw new BadGatewayException(
+          this.extractMessage(response) ?? 'ECCANG rejected getShippingMethod request'
+        );
       }
-    });
+
+      return this.extractArray(response.data ?? response);
+    } catch (error) {
+      if (error instanceof BadGatewayException) {
+        throw error;
+      }
+
+      this.logger.error(
+        'Failed to load ECCANG shipping methods',
+        error instanceof Error ? error.message : ''
+      );
+      throw new BadGatewayException('Failed to load shipping methods from ECCANG');
+    }
   }
 
-  async requestLabel(
-    requester: SafeUser,
-    id: string,
-    dto: LabelShipmentDto
-  ): Promise<Shipment> {
-    const shipment = await this.getShipmentOrThrow(id);
-    this.ensureCanAccess(requester, shipment);
+  async getExtraServices(): Promise<unknown[]> {
+    try {
+      const response = await this.eccangService.getExtraService({});
 
-    const labelType = dto.labelType ?? shipment.labelType ?? 'PDF';
+      if (!this.eccangService.isAskSuccess(response)) {
+        throw new BadGatewayException(
+          this.extractMessage(response) ?? 'ECCANG rejected getExtraService request'
+        );
+      }
 
-    let response: EccangResponse<Record<string, unknown>>;
+      return this.extractArray(response.data ?? response);
+    } catch (error) {
+      if (error instanceof BadGatewayException) {
+        throw error;
+      }
+
+      this.logger.error(
+        'Failed to load ECCANG extra services',
+        error instanceof Error ? error.message : ''
+      );
+      throw new BadGatewayException('Failed to load extra services from ECCANG');
+    }
+  }
+
+  async previewFees(
+    _user: SafeUser,
+    dto: CreateShipmentDto
+  ): Promise<unknown> {
+    // Allow both admins and users to reuse their shipment payload for previews
+    const payload = this.buildCreateOrderPayload(dto);
 
     try {
-      response = await this.eccangService.getLabelUrl({
-        reference_no: shipment.referenceNo,
+      const response = await this.eccangService.feeTrail(payload);
+
+      if (!this.eccangService.isAskSuccess(response)) {
+        throw new BadGatewayException(
+          this.extractMessage(response) ?? 'ECCANG rejected feeTrail request'
+        );
+      }
+
+      return response.data ?? response;
+    } catch (error) {
+      if (error instanceof BadGatewayException) {
+        throw error;
+      }
+
+      this.logger.error(
+        'Failed to preview ECCANG fees',
+        error instanceof Error ? error.message : ''
+      );
+      throw new BadGatewayException('Failed to preview shipment fees');
+    }
+  }
+
+  async getLabel(
+    user: SafeUser,
+    id: string,
+    query: LabelShipmentQueryDto
+  ): Promise<Shipment> {
+    const shipment = await this.getShipmentOrThrow(id);
+    this.ensureCanAccess(user, shipment);
+
+    const labelType = query.labelType ?? shipment.labelType ?? 'PDF';
+
+    let response: EccangResponse<unknown>;
+
+    try {
+      response = await this.eccangService.getLabelUrl(shipment.referenceNo, {
         label: labelType
       });
     } catch (error) {
-      this.logger.error('Failed to fetch ECCANG label URL', error instanceof Error ? error.message : '');
+      this.logger.error(
+        'Failed to retrieve ECCANG label',
+        error instanceof Error ? error.message : ''
+      );
       throw new BadGatewayException('Failed to retrieve label from ECCANG');
+    }
+
+    if (!this.eccangService.isAskSuccess(response)) {
+      throw new BadGatewayException(
+        this.extractMessage(response) ?? 'ECCANG rejected getLabelUrl request'
+      );
     }
 
     const labelUrl = this.findStringValue(response, ['labelUrl', 'label_url']);
@@ -202,46 +289,143 @@ export class ShipmentsService {
     });
   }
 
-  async track(
-    requester: SafeUser,
+  async requestLabel(
+    user: SafeUser,
     id: string,
-    dto: TrackShipmentDto
-  ): Promise<ShipmentWithEvents> {
-    const shipment = await this.getShipmentOrThrow(id, true);
-    this.ensureCanAccess(requester, shipment);
+    dto: LabelShipmentDto
+  ): Promise<Shipment> {
+    return this.getLabel(user, id, dto);
+  }
 
-    const code = dto.code ?? shipment.trackingNumber ?? shipment.referenceNo;
+  async cancel(
+    user: SafeUser,
+    id: string,
+    dto: CancelShipmentDto
+  ): Promise<Shipment> {
+    const shipment = await this.getShipmentOrThrow(id);
+    this.ensureCanAccess(user, shipment);
+
+    const code =
+      dto.code ?? shipment.orderCode ?? shipment.referenceNo ?? shipment.trackingNumber;
 
     if (!code) {
-      throw new BadGatewayException('Tracking number is not available for this shipment');
+      throw new BadGatewayException('Order code is not available for cancellation');
     }
 
-    const type = dto.type ?? 'tracking';
+    const type: 'reference_no' | 'order_code' | 'tracking_number' =
+      dto.type ??
+      (shipment.orderCode
+        ? 'order_code'
+        : shipment.trackingNumber
+        ? 'tracking_number'
+        : 'reference_no');
 
     let response: EccangResponse<unknown>;
 
     try {
-      response = await this.eccangService.getCargoTrack({
-        code,
-        type
-      });
+      response = await this.eccangService.cancelOrder(code, type);
     } catch (error) {
-      this.logger.error('Failed to retrieve ECCANG tracking information', error instanceof Error ? error.message : '');
+      this.logger.error(
+        'Failed to cancel ECCANG order',
+        error instanceof Error ? error.message : ''
+      );
+      throw new BadGatewayException('Failed to cancel shipment with ECCANG');
+    }
+
+    if (!this.eccangService.isAskSuccess(response)) {
+      throw new BadGatewayException(
+        this.extractMessage(response) ?? 'ECCANG rejected cancelOrder request'
+      );
+    }
+
+    return this.prisma.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        status: 'CANCELLED',
+        rawRequest: this.mergeJsonField(shipment.rawRequest, 'cancelOrder', {
+          code,
+          type
+        }),
+        rawResponse: this.mergeJsonField(shipment.rawResponse, 'cancelOrder', response)
+      }
+    });
+  }
+
+  async track(
+    user: SafeUser,
+    id: string,
+    query: TrackShipmentQueryDto
+  ): Promise<ShipmentWithEvents> {
+    const shipment = await this.getShipmentOrThrow(id, true);
+    this.ensureCanAccess(user, shipment);
+
+    const code =
+      query.code ??
+      shipment.trackingNumber ??
+      shipment.orderCode ??
+      shipment.referenceNo;
+
+    if (!code) {
+      throw new BadGatewayException(
+        'Tracking number or reference code is not available for this shipment'
+      );
+    }
+
+    const type: 'order_code' | 'reference_no' | 'tracking_number' =
+      query.type ??
+      (shipment.trackingNumber
+        ? 'tracking_number'
+        : shipment.orderCode
+        ? 'order_code'
+        : 'reference_no');
+    const lang: 'EN' | 'CN' = query.lang ?? 'EN';
+
+    let response: EccangResponse<unknown>;
+
+    try {
+      response = await this.eccangService.getCargoTrack([code], type, lang);
+    } catch (error) {
+      this.logger.error(
+        'Failed to retrieve ECCANG tracking information',
+        error instanceof Error ? error.message : ''
+      );
       throw new BadGatewayException('Failed to retrieve tracking information');
     }
 
+    if (!this.eccangService.isAskSuccess(response)) {
+      throw new BadGatewayException(
+        this.extractMessage(response) ?? 'ECCANG rejected getCargoTrack request'
+      );
+    }
+
     const events = this.eccangService.normalizeTrackingEvents(
-      response.data ?? response
+      response?.data ?? response
+    );
+    const status = this.resolveStatus(response) ?? shipment.status;
+
+    const operations: Prisma.PrismaPromise<unknown>[] = [];
+
+    operations.push(
+      this.prisma.shipment.update({
+        where: { id: shipment.id },
+        data: {
+          status,
+          rawRequest: this.mergeJsonField(shipment.rawRequest, 'getCargoTrack', {
+            code,
+            type,
+            lang
+          }),
+          rawResponse: this.mergeJsonField(shipment.rawResponse, 'getCargoTrack', response)
+        }
+      })
     );
 
-    const transactions: Prisma.PrismaPromise<unknown>[] = [];
-
     if (events.length > 0) {
-      transactions.push(
+      operations.push(
         this.prisma.trackingEvent.deleteMany({ where: { shipmentId: shipment.id } })
       );
 
-      transactions.push(
+      operations.push(
         this.prisma.trackingEvent.createMany({
           data: events.map((event) => ({
             shipmentId: shipment.id,
@@ -254,142 +438,120 @@ export class ShipmentsService {
       );
     }
 
-    transactions.push(
-      this.prisma.shipment.update({
-        where: { id: shipment.id },
-        data: {
-          status: this.findStringValue(response, ['status', 'track_status']) ??
-            shipment.status,
-          rawRequest: this.mergeJsonField(shipment.rawRequest, 'getCargoTrack', {
-            code,
-            type
-          }),
-          rawResponse: this.mergeJsonField(shipment.rawResponse, 'getCargoTrack', response)
-        }
-      })
-    );
+    await this.prisma.$transaction(operations);
 
-    await this.prisma.$transaction(transactions);
-
-    return this.findOne(requester, shipment.id);
+    return this.findOne(user, shipment.id);
   }
 
-  async cancel(
-    requester: SafeUser,
+  async trackViaBody(
+    user: SafeUser,
     id: string,
-    dto: CancelShipmentDto
-  ): Promise<Shipment> {
-    const shipment = await this.getShipmentOrThrow(id);
-    this.ensureCanAccess(requester, shipment);
+    dto: TrackShipmentDto
+  ): Promise<ShipmentWithEvents> {
+    return this.track(user, id, dto);
+  }
 
-    const code = dto.code ?? shipment.orderCode ?? shipment.referenceNo;
-
-    if (!code) {
-      throw new BadGatewayException('Order code is not available for cancellation');
+  async trackAnonymous(
+    query: TrackShipmentQueryDto
+  ): Promise<{ code: string; events: NormalizedTrackingEvent[]; status: string }> {
+    if (!query.code) {
+      throw new BadGatewayException('Tracking code is required');
     }
 
-    const type = dto.type ?? 'order';
-
-    let response: EccangResponse<unknown>;
+    const type = query.type ?? 'tracking_number';
+    const lang = query.lang ?? 'EN';
 
     try {
-      response = await this.eccangService.cancelOrder({
-        code,
-        type
-      });
-    } catch (error) {
-      this.logger.error('Failed to cancel ECCANG order', error instanceof Error ? error.message : '');
-      throw new BadGatewayException('Failed to cancel shipment with ECCANG');
-    }
+      const response = await this.eccangService.getCargoTrack([query.code], type, lang);
 
-    const isCancelled = this.isSuccessful(response);
-
-    return this.prisma.shipment.update({
-      where: { id: shipment.id },
-      data: {
-        status: isCancelled ? 'CANCELLED' : shipment.status,
-        rawRequest: this.mergeJsonField(shipment.rawRequest, 'cancelOrder', {
-          code,
-          type
-        }),
-        rawResponse: this.mergeJsonField(shipment.rawResponse, 'cancelOrder', response)
+      if (!this.eccangService.isAskSuccess(response)) {
+        throw new BadGatewayException(
+          this.extractMessage(response) ?? 'ECCANG rejected getCargoTrack request'
+        );
       }
-    });
+
+      const events = this.eccangService.normalizeTrackingEvents(response.data ?? response);
+      return {
+        code: query.code,
+        events,
+        status: this.resolveStatus(response)
+      };
+    } catch (error) {
+      if (error instanceof BadGatewayException) {
+        throw error;
+      }
+
+      this.logger.error(
+        'Failed to perform anonymous ECCANG tracking',
+        error instanceof Error ? error.message : ''
+      );
+      throw new BadGatewayException('Failed to retrieve tracking information');
+    }
   }
 
-  async report(
-    requester: SafeUser,
-    query: ShipmentReportQueryDto
-  ): Promise<{
-    totalShipments: number;
-    totalWeightKg: number;
-    totalPieces: number;
-    byStatus: Record<string, number>;
-    totalFees: number;
-  }> {
-    const where: Prisma.ShipmentWhereInput = {};
-
-    if (requester.role === Role.ADMIN) {
-      if (query.ownerId) {
-        where.ownerId = query.ownerId;
-      }
-    } else {
-      where.ownerId = requester.id;
-    }
-
-    const dateFilter: Prisma.DateTimeFilter = {};
-
-    if (query.startDate) {
-      dateFilter.gte = new Date(query.startDate);
-    }
-
-    if (query.endDate) {
-      dateFilter.lte = new Date(query.endDate);
-    }
-
-    if (Object.keys(dateFilter).length > 0) {
-      where.createdAt = dateFilter;
-    }
-
-    const shipments = await this.prisma.shipment.findMany({ where });
-
-    const byStatus = shipments.reduce<Record<string, number>>((acc, shipment) => {
-      acc[shipment.status] = (acc[shipment.status] ?? 0) + 1;
-      return acc;
-    }, {});
-
-    const totalWeightKg = shipments.reduce(
-      (sum, shipment) => sum + (shipment.weightKg ?? 0),
-      0
-    );
-    const totalPieces = shipments.reduce(
-      (sum, shipment) => sum + (shipment.pieces ?? 0),
-      0
-    );
-
-    let totalFees = 0;
-
-    if (shipments.length > 0) {
-      try {
-        const response = await this.eccangService.getReceivingExpense({
-          start_date: query.startDate,
-          end_date: query.endDate,
-          reference_no: shipments.map((shipment) => shipment.referenceNo)
-        });
-
-        totalFees = this.extractNumericTotal(response);
-      } catch (error) {
-        this.logger.warn('Failed to retrieve ECCANG receiving expense', error instanceof Error ? error.message : '');
-      }
-    }
-
+  private buildCreateOrderPayload(dto: CreateShipmentDto): Record<string, unknown> {
     return {
-      totalShipments: shipments.length,
-      totalWeightKg,
-      totalPieces,
-      byStatus,
-      totalFees
+      reference_no: dto.referenceNo,
+      shipping_method: dto.shippingMethod,
+      country_code: dto.countryCode,
+      weight: dto.weightKg,
+      pieces: dto.pieces,
+      consignee: this.normalizeParty(dto.consignee),
+      shipper: this.normalizeParty(dto.shipper),
+      items: dto.items.map((item) => this.normalizeItem(item)),
+      extra_services: dto.extraServices?.map((service) =>
+        this.normalizeExtraService(service)
+      ),
+      remark: dto.remarks,
+      label: dto.labelType ?? 'PDF',
+      ...(dto.additionalPayload ?? {})
     };
+  }
+
+  private normalizeParty(party: ShipmentPartyDto): Record<string, unknown> {
+    return {
+      name: party.name,
+      company: party.company,
+      phone: party.phone,
+      email: party.email,
+      country: party.country,
+      province: party.province,
+      city: party.city,
+      address_line1: party.addressLine1,
+      address_line2: party.addressLine2,
+      postal_code: party.postalCode
+    };
+  }
+
+  private normalizeItem(item: ShipmentItemDto): Record<string, unknown> {
+    return {
+      name: item.name,
+      sku: item.sku,
+      hs_code: item.hsCode,
+      quantity: item.quantity,
+      unit_weight: item.unitWeightKg,
+      declared_value: item.declaredValue,
+      origin_country: item.originCountry
+    };
+  }
+
+  private normalizeExtraService(
+    service: ShipmentExtraServiceDto
+  ): Record<string, unknown> {
+    return {
+      code: service.code,
+      value: service.value
+    };
+  }
+
+  private ensureCanAccess(user: SafeUser, shipment: Shipment): void {
+    if (user.role === Role.ADMIN) {
+      return;
+    }
+
+    if (shipment.ownerId !== user.id) {
+      throw new ForbiddenException('You do not have access to this shipment');
+    }
   }
 
   private async getShipmentOrThrow(
@@ -414,16 +576,6 @@ export class ShipmentsService {
     return shipment as ShipmentWithEvents | Shipment;
   }
 
-  private ensureCanAccess(user: SafeUser, shipment: Shipment): void {
-    if (user.role === Role.ADMIN) {
-      return;
-    }
-
-    if (shipment.ownerId !== user.id) {
-      throw new ForbiddenException('You do not have access to this shipment');
-    }
-  }
-
   private mergeJsonField(
     current: unknown,
     key: string,
@@ -439,46 +591,185 @@ export class ShipmentsService {
   }
 
   private resolveStatus(response: EccangResponse<unknown>): string {
-    if (!response) {
-      return 'CREATED';
+    const statusCandidate =
+      this.findStringValue(response, ['track_status', 'trackStatus', 'status']) ??
+      this.findStringValue(response?.data, [
+        'track_status',
+        'trackStatus',
+        'status'
+      ]);
+
+    if (statusCandidate) {
+      return this.eccangService.mapStatus(statusCandidate);
     }
 
-    const status = this.findStringValue(response, ['status', 'orderStatus']);
-
-    if (status) {
-      return status;
-    }
-
-    if (this.isSuccessful(response)) {
+    if (this.eccangService.isAskSuccess(response)) {
       return 'SUBMITTED';
     }
 
     return 'CREATED';
   }
 
-  private isSuccessful(response: EccangResponse<unknown>): boolean {
-    const ack = response.ack ?? response.ackCode ?? response.success ?? response.code;
-
-    if (typeof ack === 'boolean') {
-      return ack;
+  private shouldPollForTrackNumber(status?: string): boolean {
+    if (!status) {
+      return false;
     }
 
-    if (typeof ack === 'number') {
-      return ack === 1;
+    const normalized = this.eccangService.mapStatus(status);
+    return ['AWAITING_TRACK_NUMBER', 'LABEL_READY'].includes(normalized);
+  }
+
+  private enqueueTrackNumberPoll(shipmentId: string, referenceNo: string): void {
+    const executePoll = async (attempt: number): Promise<void> => {
+      if (attempt > TRACK_NUMBER_POLL_ATTEMPTS) {
+        this.pollers.delete(shipmentId);
+        return;
+      }
+
+      try {
+        const response = await this.eccangService.getTrackNumber([referenceNo]);
+
+        if (this.eccangService.isAskSuccess(response)) {
+          const trackingNumber = this.findStringValue(response, [
+            'trackingNumber',
+            'tracking_number',
+            'trackingNo',
+            'tracking_no',
+            'mailNo'
+          ]);
+          const orderCode = this.findStringValue(response, [
+            'orderCode',
+            'order_code',
+            'orderNo',
+            'order_no',
+            'code'
+          ]);
+
+          if (trackingNumber || orderCode) {
+            const shipment = await this.prisma.shipment.findUnique({
+              where: { id: shipmentId }
+            });
+
+            if (shipment) {
+              await this.prisma.shipment.update({
+                where: { id: shipmentId },
+                data: {
+                  trackingNumber: trackingNumber ?? shipment.trackingNumber ?? null,
+                  orderCode: orderCode ?? shipment.orderCode ?? null,
+                  status: this.resolveStatus(response),
+                  rawRequest: this.mergeJsonField(
+                    shipment.rawRequest,
+                    'getTrackNumber',
+                    {
+                      reference_no: [referenceNo]
+                    }
+                  ),
+                  rawResponse: this.mergeJsonField(
+                    shipment.rawResponse,
+                    'getTrackNumber',
+                    response
+                  )
+                }
+              });
+            }
+
+            this.pollers.delete(shipmentId);
+            return;
+          }
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Failed to poll ECCANG track number: ${
+            error instanceof Error ? error.message : 'Unknown error'
+          }`
+        );
+      }
+
+      this.replacePoller(
+        shipmentId,
+        setTimeout(() => {
+          void executePoll(attempt + 1);
+        }, TRACK_NUMBER_POLL_INTERVAL)
+      );
+    };
+
+    this.replacePoller(
+      shipmentId,
+      setTimeout(() => {
+        void executePoll(1);
+      }, TRACK_NUMBER_POLL_INTERVAL)
+    );
+  }
+
+  private replacePoller(id: string, handle: NodeJS.Timeout): void {
+    const existing = this.pollers.get(id);
+    if (existing) {
+      clearTimeout(existing);
     }
 
-    if (typeof ack === 'string') {
-      const normalized = ack.toLowerCase();
-      return ['true', 'success', 'successful', 'ok', '1', '200'].includes(normalized);
+    this.pollers.set(id, handle);
+  }
+
+  private clearPollers(): void {
+    for (const handle of this.pollers.values()) {
+      clearTimeout(handle);
     }
 
-    return false;
+    this.pollers.clear();
+  }
+
+  private extractArray(payload: unknown): unknown[] {
+    if (!payload) {
+      return [];
+    }
+
+    if (Array.isArray(payload)) {
+      return payload;
+    }
+
+    if (typeof payload === 'object') {
+      const record = payload as Record<string, unknown>;
+      const candidateKeys = [
+        'items',
+        'item',
+        'data',
+        'list',
+        'rows',
+        'methods',
+        'services',
+        'shippingMethods',
+        'results'
+      ];
+
+      for (const key of candidateKeys) {
+        const value = record[key];
+        if (Array.isArray(value)) {
+          return value;
+        }
+      }
+
+      for (const value of Object.values(record)) {
+        if (Array.isArray(value)) {
+          return value;
+        }
+      }
+    }
+
+    return [];
   }
 
   private findStringValue(
     payload: unknown,
     keys: string[]
   ): string | undefined {
+    if (!payload) {
+      return undefined;
+    }
+
+    if (typeof payload === 'string') {
+      return payload;
+    }
+
     const queue: unknown[] = [payload];
 
     while (queue.length > 0) {
@@ -507,70 +798,10 @@ export class ShipmentsService {
     return undefined;
   }
 
-  private extractNumericTotal(response: EccangResponse<unknown>): number {
-    const data = response?.data;
-
-    const fromData = this.findNumericValue(data, [
-      'totalFee',
-      'total_fee',
-      'total',
-      'fee',
-      'amount'
-    ]);
-
-    if (fromData !== undefined) {
-      return fromData;
-    }
-
-    return this.findNumericValue(response, [
-      'totalFee',
-      'total_fee',
-      'total',
-      'fee',
-      'amount'
-    ]) ?? 0;
-  }
-
-  private findNumericValue(
-    payload: unknown,
-    keys: string[]
-  ): number | undefined {
-    if (!payload) {
-      return undefined;
-    }
-
-    if (Array.isArray(payload)) {
-      return payload
-        .map((item) => this.findNumericValue(item, keys) ?? 0)
-        .reduce((sum, value) => sum + value, 0);
-    }
-
-    if (typeof payload === 'object') {
-      const record = payload as Record<string, unknown>;
-
-      for (const key of keys) {
-        const value = record[key];
-
-        if (typeof value === 'number') {
-          return value;
-        }
-
-        if (typeof value === 'string' && value.trim().length > 0) {
-          const parsed = Number(value);
-          if (!Number.isNaN(parsed)) {
-            return parsed;
-          }
-        }
-      }
-
-      for (const value of Object.values(record)) {
-        const numeric = this.findNumericValue(value, keys);
-        if (numeric !== undefined) {
-          return numeric;
-        }
-      }
-    }
-
-    return undefined;
+  private extractMessage(response: EccangResponse<unknown>): string | undefined {
+    return (
+      this.findStringValue(response, ['message', 'msg', 'errorMessage']) ??
+      this.findStringValue(response?.data, ['message', 'msg', 'errorMessage'])
+    );
   }
 }

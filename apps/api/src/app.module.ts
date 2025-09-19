@@ -5,6 +5,7 @@ import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { EccangModule } from './eccang/eccang.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { ReportsModule } from './reports/reports.module';
 import { ShipmentsModule } from './shipments/shipments.module';
 import { UsersModule } from './users/users.module';
 
@@ -17,7 +18,8 @@ import { UsersModule } from './users/users.module';
     AuthModule,
     UsersModule,
     EccangModule,
-    ShipmentsModule
+    ShipmentsModule,
+    ReportsModule
   ],
   controllers: [AppController],
   providers: [AppService]

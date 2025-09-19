@@ -42,10 +42,10 @@ model Shipment {
   invoiceUrl     String?
   fee            Decimal?        @db.Decimal(10, 2)
   metadata       Json?
-  rawRequest     Json?
-  rawResponse    Json?
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
+  rawRequest     Json?
+  rawResponse    Json?
   events         TrackingEvent[]
 }
 

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
+import { RootProviders } from '@/components/providers/root-providers';
 import { cn } from '@/lib/utils';
 import './globals.css';
 
@@ -24,7 +25,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={cn('min-h-screen bg-background font-sans antialiased', inter.variable)}>
-        {children}
+        <RootProviders>{children}</RootProviders>
       </body>
     </html>
   );

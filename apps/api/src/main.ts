@@ -15,7 +15,7 @@ async function bootstrap(): Promise<void> {
     })
   );
 
-  const port = Number(process.env.PORT ?? 3001);
+  const port = Number(process.env.PORT ?? 4000);
   await app.listen(port);
 
   const url = await app.getUrl();

@@ -1,82 +1,184 @@
-import { HttpService } from '@nestjs/axios';
-import {
-  Injectable,
-  Logger,
-  ServiceUnavailableException
-} from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { lastValueFrom } from 'rxjs';
-import { parseStringPromise } from 'xml2js';
+import { EccangClient } from './eccang.client';
 import { EccangResponse, NormalizedTrackingEvent } from './eccang.types';
 
-const SOAP_NAMESPACE = 'http://tempuri.org/';
+const STATUS_LABELS = new Map<string, string>([
+  ['0', 'CREATED'],
+  ['1', 'SUBMITTED'],
+  ['2', 'AWAITING_TRACK_NUMBER'],
+  ['3', 'LABEL_READY'],
+  ['4', 'IN_TRANSIT'],
+  ['5', 'DELIVERED'],
+  ['6', 'EXCEPTION'],
+  ['7', 'CANCELLED'],
+  ['created', 'CREATED'],
+  ['submitted', 'SUBMITTED'],
+  ['waiting', 'AWAITING_TRACK_NUMBER'],
+  ['pending', 'AWAITING_TRACK_NUMBER'],
+  ['label_ready', 'LABEL_READY'],
+  ['label', 'LABEL_READY'],
+  ['in_transit', 'IN_TRANSIT'],
+  ['transit', 'IN_TRANSIT'],
+  ['delivered', 'DELIVERED'],
+  ['exception', 'EXCEPTION'],
+  ['cancelled', 'CANCELLED'],
+  ['canceled', 'CANCELLED'],
+  ['success', 'SUBMITTED']
+]);
 
 @Injectable()
 export class EccangService {
   private readonly logger = new Logger(EccangService.name);
-  private readonly endpoint: string;
-  private readonly appToken: string;
-  private readonly appKey: string;
+  private readonly client?: EccangClient;
 
-  constructor(
-    private readonly httpService: HttpService,
-    configService: ConfigService
-  ) {
-    this.endpoint = configService.get<string>('ECCANG_SERVICE_URL') ?? '';
-    this.appToken = configService.get<string>('ECCANG_APP_TOKEN') ?? '';
-    this.appKey = configService.get<string>('ECCANG_APP_KEY') ?? '';
+  constructor(configService: ConfigService) {
+    const baseUrl = configService.get<string>('ECCANG_SERVICE_URL');
+    const appToken = configService.get<string>('ECCANG_APP_TOKEN');
+    const appKey = configService.get<string>('ECCANG_APP_KEY');
 
-    if (!this.endpoint || !this.appToken || !this.appKey) {
+    if (baseUrl && appToken && appKey) {
+      this.client = new EccangClient(baseUrl, appToken, appKey);
+    } else {
       this.logger.warn('ECCANG credentials are missing from environment variables');
     }
   }
 
-  async createOrder<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('createOrder', params);
+  async createOrder(
+    payload: Record<string, unknown>
+  ): Promise<EccangResponse<Record<string, unknown>>> {
+    return this.call<EccangResponse<Record<string, unknown>>>(
+      'createOrder',
+      payload
+    );
   }
 
-  async getTrackNumber<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('getTrackNumber', params);
+  async getTrackNumber(
+    referenceNos: string[]
+  ): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('getTrackNumber', {
+      reference_no: referenceNos
+    });
   }
 
-  async getLabelUrl<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('getLabelUrl', params);
+  async getLabelUrl(
+    code: string,
+    options?: Record<string, unknown>
+  ): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('getLabelUrl', {
+      reference_no: code,
+      ...(options ?? {})
+    });
   }
 
-  async getCargoTrack<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('getCargoTrack', params);
+  async cancelOrder(
+    code: string,
+    type: 'reference_no' | 'order_code' | 'tracking_number'
+  ): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('cancelOrder', {
+      code,
+      type
+    });
   }
 
-  async cancelOrder<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('cancelOrder', params);
+  async getCargoTrack(
+    codes: string[],
+    type: 'order_code' | 'reference_no' | 'tracking_number' = 'reference_no',
+    lang: 'EN' | 'CN' = 'EN'
+  ): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('getCargoTrack', {
+      code: codes,
+      type,
+      lang
+    });
   }
 
-  async feeTrail<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('feeTrail', params);
+  async feeTrail(
+    params: Record<string, unknown>
+  ): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('feeTrail', params);
   }
 
-  async getShippingMethod<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('getShippingMethod', params);
+  async getShippingMethod(
+    params: Record<string, unknown> = {}
+  ): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('getShippingMethod', params);
   }
 
-  async getExtraService<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('getExtraService', params);
+  async getExtraService(
+    params: Record<string, unknown> = {}
+  ): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('getExtraService', params);
   }
 
-  async getFieldRule<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('getFieldRule', params);
+  async getFieldRule(
+    params: Record<string, unknown> = {}
+  ): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('getFieldRule', params);
   }
 
-  async getCountry<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('getCountry', params);
+  async getCountry(): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('getCountry', {});
   }
 
-  async getGoodstype<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('getGoodstype', params);
+  async getGoodstype(): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('getGoodstype', {});
   }
 
-  async getReceivingExpense<T = unknown>(params: unknown): Promise<EccangResponse<T>> {
-    return this.callService<EccangResponse<T>>('getReceivingExpense', params);
+  async getReceivingExpense(
+    params: Record<string, unknown>
+  ): Promise<EccangResponse<unknown>> {
+    return this.call<EccangResponse<unknown>>('getReceivingExpense', params);
+  }
+
+  mapStatus(input: unknown): string {
+    if (typeof input === 'number') {
+      return this.mapStatus(String(input));
+    }
+
+    if (typeof input !== 'string') {
+      return 'CREATED';
+    }
+
+    const trimmed = input.trim();
+
+    if (!trimmed) {
+      return 'CREATED';
+    }
+
+    const normalized = trimmed.toLowerCase();
+    const mapped = STATUS_LABELS.get(normalized) ?? STATUS_LABELS.get(trimmed);
+
+    if (mapped) {
+      return mapped;
+    }
+
+    return trimmed.toUpperCase();
+  }
+
+  isAskSuccess(response: EccangResponse<unknown>): boolean {
+    const ack =
+      response?.ack ??
+      response?.ackCode ??
+      response?.success ??
+      response?.code ??
+      response?.msg ??
+      response?.message;
+
+    if (typeof ack === 'boolean') {
+      return ack;
+    }
+
+    if (typeof ack === 'number') {
+      return ack === 1 || ack === 200;
+    }
+
+    if (typeof ack === 'string') {
+      const normalized = ack.trim().toLowerCase();
+      return ['success', 'true', 'ok', '1', '200'].includes(normalized);
+    }
+
+    return false;
   }
 
   normalizeTrackingEvents(payload: unknown): NormalizedTrackingEvent[] {
@@ -194,100 +296,35 @@ export class EccangService {
     return {
       occurredAt,
       statusCode:
-        typeof statusCandidate === 'string' ? statusCandidate : undefined,
+        typeof statusCandidate === 'string'
+          ? this.mapStatus(statusCandidate)
+          : undefined,
       comment:
         typeof commentCandidate === 'string' ? commentCandidate : undefined,
       area: typeof areaCandidate === 'string' ? areaCandidate : undefined
     };
   }
 
-  private async callService<T>(service: string, params: unknown): Promise<T> {
-    if (!this.endpoint || !this.appToken || !this.appKey) {
-      throw new ServiceUnavailableException('ECCANG credentials are not configured');
+  private getClient(): EccangClient {
+    if (!this.client) {
+      throw new ServiceUnavailableException(
+        'ECCANG credentials are not configured'
+      );
     }
 
-    const envelope = this.buildEnvelope(service, params ?? {});
+    return this.client;
+  }
 
+  private async call<T>(service: string, params: unknown): Promise<T> {
     try {
-      const response$ = this.httpService.post(this.endpoint, envelope, {
-        headers: {
-          'Content-Type': 'text/xml; charset=utf-8',
-          SOAPAction: `${SOAP_NAMESPACE}callService`
-        },
-        timeout: 15000
-      });
-
-      const response = await lastValueFrom(response$);
-      return await this.parseResponse<T>(response.data);
+      return await this.getClient().call<T>(service, params ?? {});
     } catch (error) {
-      this.logger.error(`ECCANG call to ${service} failed`, error instanceof Error ? error.message : '');
-      throw new ServiceUnavailableException('Unable to reach ECCANG service');
+      const message =
+        error instanceof Error ? error.message : 'Unexpected ECCANG error';
+      this.logger.error(`ECCANG call to ${service} failed: ${message}`);
+      throw new ServiceUnavailableException(
+        'Unable to reach ECCANG service'
+      );
     }
-  }
-
-  private buildEnvelope(service: string, params: unknown): string {
-    const paramsJson = JSON.stringify(params ?? {});
-
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-  <soap:Body>
-    <callService xmlns="${SOAP_NAMESPACE}">
-      <appToken>${this.escapeXml(this.appToken)}</appToken>
-      <appKey>${this.escapeXml(this.appKey)}</appKey>
-      <service>${this.escapeXml(service)}</service>
-      <paramsJson>${this.escapeXml(paramsJson)}</paramsJson>
-    </callService>
-  </soap:Body>
-</soap:Envelope>`;
-  }
-
-  private async parseResponse<T>(xml: string): Promise<T> {
-    try {
-      const parsed = await parseStringPromise(xml, {
-        explicitArray: false,
-        ignoreAttrs: false,
-        trim: true
-      });
-
-      const envelope =
-        parsed['soap:Envelope'] ?? parsed.Envelope ?? parsed['SOAP-ENV:Envelope'];
-      const body =
-        envelope?.['soap:Body'] ??
-        envelope?.Body ??
-        envelope?.['SOAP-ENV:Body'];
-      const responseNode =
-        body?.callServiceResponse ??
-        body?.['ns1:callServiceResponse'] ??
-        body?.['ns2:callServiceResponse'] ??
-        body?.['soap:callServiceResponse'];
-
-      const result =
-        responseNode?.return ??
-        responseNode?.CallServiceResult ??
-        responseNode?.response ??
-        responseNode;
-
-      if (typeof result === 'string') {
-        return JSON.parse(result) as T;
-      }
-
-      if (result && typeof result === 'object') {
-        return result as T;
-      }
-
-      throw new Error('Unexpected response structure');
-    } catch (error) {
-      this.logger.error('Failed to parse ECCANG response', error instanceof Error ? error.message : '');
-      throw new ServiceUnavailableException('Invalid response from ECCANG service');
-    }
-  }
-
-  private escapeXml(value: string): string {
-    return value
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
   }
 }
