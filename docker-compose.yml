@@ -1,0 +1,70 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: newcourier-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: newcourier
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: development
+    container_name: newcourier-api
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/newcourier?schema=public
+    ports:
+      - "3001:3001"
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+      - api-node-modules:/usr/src/app/node_modules
+    command: >-
+      sh -c "corepack enable pnpm && pnpm install && pnpm --filter @newcourier/api dev"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: development
+    container_name: newcourier-web
+    depends_on:
+      - api
+    env_file:
+      - .env
+    environment:
+      PORT: 3000
+      NEXTAUTH_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+      - web-node-modules:/usr/src/app/node_modules
+    command: >-
+      sh -c "corepack enable pnpm && pnpm install && pnpm --filter @newcourier/web dev"
+
+volumes:
+  postgres-data:
+  api-node-modules:
+  web-node-modules:
