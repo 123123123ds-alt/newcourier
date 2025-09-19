@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: newcourier
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: development
+    depends_on:
+      - db
+    env_file:
+      - .env
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/newcourier?schema=public
+      ECCANG_SERVICE_URL: ${ECCANG_SERVICE_URL}
+      ECCANG_APP_TOKEN: ${ECCANG_APP_TOKEN}
+      ECCANG_APP_KEY: ${ECCANG_APP_KEY}
+      JWT_SECRET_DEV: ${JWT_SECRET_DEV}
+    command: pnpm --filter @newcourier/api start:dev
+    ports:
+      - "4000:4000"
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+      - api-node-modules:/usr/src/app/node_modules
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: development
+    depends_on:
+      - api
+    env_file:
+      - .env
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000/api
+    command: pnpm --filter @newcourier/web dev
+    ports:
+      - "3000:3000"
+    working_dir: /usr/src/app
+    volumes:
+      - .:/usr/src/app
+      - web-node-modules:/usr/src/app/node_modules
+
+volumes:
+  postgres-data:
+  api-node-modules:
+  web-node-modules:
